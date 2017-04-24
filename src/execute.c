@@ -49,6 +49,9 @@ struct jq_state {
   void *input_cb_data;
   jq_msg_cb debug_cb;
   void *debug_cb_data;
+
+  void *last_regex;
+  jq_clear_last_regex_cb clear_last_regex_cb;
 };
 
 struct closure {
@@ -320,6 +323,7 @@ static void jq_reset(jq_state *jq) {
   jv_free(jq->value_at_path);
   jq->value_at_path = jv_null();
   jq->subexp_nest = 0;
+
 }
 
 void jq_report_error(jq_state *jq, jv value) {
@@ -1002,6 +1006,9 @@ jq_state *jq_init(void) {
   jq->attrs = jv_object();
   jq->path = jv_null();
   jq->value_at_path = jv_null();
+
+  jq->last_regex = NULL;
+  jq->clear_last_regex_cb = NULL;
   return jq;
 }
 
@@ -1049,6 +1056,9 @@ void jq_teardown(jq_state **jq) {
   *jq = NULL;
 
   jq_reset(old_jq);
+  if (old_jq->clear_last_regex_cb != NULL) {
+    old_jq->clear_last_regex_cb(old_jq->last_regex);
+  }
   bytecode_free(old_jq->bc);
   old_jq->bc = 0;
   jv_free(old_jq->attrs);
@@ -1247,4 +1257,13 @@ jv jq_get_exit_code(jq_state *jq)
 jv jq_get_error_message(jq_state *jq)
 {
   return jv_copy(jq->error_message);
+}
+
+void jq_set_last_regex(jq_state *jq, void *last_regex, jq_clear_last_regex_cb cb) {
+  jq->last_regex = last_regex;
+  jq->clear_last_regex_cb = cb;
+}
+
+void *jq_get_last_regex(jq_state *jq) {
+  return jq->last_regex;
 }

@@ -12,6 +12,7 @@ enum {
 
 typedef struct jq_state jq_state;
 typedef void (*jq_msg_cb)(void *, jv);
+typedef void (*jq_clear_last_regex_cb)(void *);
 
 jq_state *jq_init(void);
 void jq_set_error_cb(jq_state *, jq_msg_cb, void *);
@@ -30,6 +31,9 @@ void jq_halt(jq_state *, jv, jv);
 int jq_halted(jq_state *);
 jv jq_get_exit_code(jq_state *);
 jv jq_get_error_message(jq_state *);
+
+void jq_set_last_regex(jq_state *, void *, jq_clear_last_regex_cb);
+void *jq_get_last_regex(jq_state *);
 
 typedef jv (*jq_input_cb)(jq_state *, void *);
 void jq_set_input_cb(jq_state *, jq_input_cb, void *);

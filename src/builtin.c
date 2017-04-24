@@ -750,35 +750,32 @@ static int f_match_name_iter(const UChar* name, const UChar *name_end, int ngrou
   return 0;
 }
 
-static jv f_match(jq_state *jq, jv input, jv regex, jv modifiers, jv testmode) {
-  int test = jv_equal(testmode, jv_true());
-  jv result;
-  int onigret;
-  int global = 0;
-  regex_t *reg;
-  OnigErrorInfo einfo;
-  OnigRegion* region;
+typedef struct onig_regex_info {
+  jv regex;
+  jv modifiers;
+  regex_t *onig_regex;
+  int global;
+} onig_regex_info;
 
-  if (jv_get_kind(input) != JV_KIND_STRING) {
-    jv_free(regex);
-    jv_free(modifiers);
-    return type_error(input, "cannot be matched, as it is not a string");
-  }
-
-  if (jv_get_kind(regex) != JV_KIND_STRING) {
-    jv_free(input);
-    jv_free(modifiers);
-    return type_error(regex, "is not a string");
-  }
-
+static jv _make_onig_regex(jv regex, jv modifiers, onig_regex_info *onig_regex_info) {
   OnigOptionType options = ONIG_OPTION_CAPTURE_GROUP;
-
+  onig_regex_info->global = 0;
+  
+  jv_free(onig_regex_info->regex);
+  jv_free(onig_regex_info->modifiers);
+  if (onig_regex_info->onig_regex != NULL) {
+    onig_free(onig_regex_info->onig_regex);
+  }
+  
+  onig_regex_info->regex = jv_copy(regex);
+  onig_regex_info->modifiers = jv_copy(modifiers);
+  
   if (jv_get_kind(modifiers) == JV_KIND_STRING) {
     jv modarray = jv_string_explode(jv_copy(modifiers));
     jv_array_foreach(modarray, i, mod) {
       switch ((int)jv_number_value(mod)) {
         case 'g':
-          global = 1;
+          onig_regex_info->global = 1;
           break;
         case 'i':
           options |= ONIG_OPTION_IGNORECASE;
@@ -802,42 +799,102 @@ static jv f_match(jq_state *jq, jv input, jv regex, jv modifiers, jv testmode) {
           options |= ONIG_OPTION_FIND_NOT_EMPTY;
           break;
         default:
-          jv_free(input);
-          jv_free(regex);
           jv_free(modarray);
+          jv_free(regex);
+          jv_free(onig_regex_info->regex);
+          jv_free(onig_regex_info->modifiers);
+          onig_regex_info->regex = jv_null();
+          onig_regex_info->modifiers = jv_null();
           return jv_invalid_with_msg(jv_string_concat(modifiers,
                 jv_string(" is not a valid modifier string")));
       }
     }
     jv_free(modarray);
-  } else if (jv_get_kind(modifiers) != JV_KIND_NULL) {
-    // If it isn't a string or null, then it is the wrong type...
-    jv_free(input);
-    jv_free(regex);
-    return type_error(modifiers, "is not a string");
-  }
-
+  } 
   jv_free(modifiers);
 
-  onigret = onig_new(&reg, (const UChar*)jv_string_value(regex),
+  OnigErrorInfo einfo;
+  int onigret = onig_new(&(onig_regex_info->onig_regex), (const UChar*)jv_string_value(regex),
       (const UChar*)(jv_string_value(regex) + jv_string_length_bytes(jv_copy(regex))),
       options, ONIG_ENCODING_UTF8, ONIG_SYNTAX_PERL_NG, &einfo);
   if (onigret != ONIG_NORMAL) {
     UChar ebuf[ONIG_MAX_ERROR_MESSAGE_LEN];
     onig_error_code_to_str(ebuf, onigret, &einfo);
-    jv_free(input);
     jv_free(regex);
+    jv_free(onig_regex_info->regex);
+    jv_free(onig_regex_info->modifiers);
+    onig_regex_info->regex = jv_null();
+    onig_regex_info->modifiers = jv_null();
+    onig_regex_info->onig_regex = NULL;
     return jv_invalid_with_msg(jv_string_concat(jv_string("Regex failure: "),
           jv_string((char*)ebuf)));
   }
+  return jv_true();
+}
+
+static void clear_last_onig_regex_cb(onig_regex_info* regex_info) {
+  jv_free(regex_info->regex);
+  jv_free(regex_info->modifiers);
+  regex_info->global = 0;
+  onig_free(regex_info->onig_regex);
+  free(regex_info);
+}
+
+static jv f_match(jq_state *jq, jv input, jv regex, jv modifiers, jv testmode) {
+  int test = jv_equal(testmode, jv_true());
+  jv result;
+  int onigret;
+
+  if (jv_get_kind(input) != JV_KIND_STRING) {
+    jv_free(regex);
+    jv_free(modifiers);
+    return type_error(input, "cannot be matched, as it is not a string");
+  }
+
+  if (jv_get_kind(regex) != JV_KIND_STRING) {
+    jv_free(input);
+    jv_free(modifiers);
+    return type_error(regex, "is not a string");
+  }
+
+  jv_kind mod_kind = jv_get_kind(modifiers);
+  if (mod_kind != JV_KIND_NULL && mod_kind != JV_KIND_STRING) {
+    // If it isn't a string or null, then it is the wrong type...
+    jv_free(input);
+    jv_free(regex);
+    return type_error(modifiers, "is not a string");
+  }
+ 
+  //check the cached regex info if it exists
+  onig_regex_info *regex_info = jq_get_last_regex(jq);
+  if (regex_info == NULL) {
+    regex_info = malloc(sizeof(onig_regex_info));
+    regex_info->regex = jv_null();
+    regex_info->modifiers = jv_null();
+    regex_info->global = 0;
+    regex_info->onig_regex = NULL;
+    jq_set_last_regex(jq, regex_info, clear_last_onig_regex_cb);
+  }
+  
+  //if different regex or modifiers, must recreate oniguruma regex
+  if (!jv_equal(jv_copy(regex_info->regex), jv_copy(regex)) || !jv_equal(jv_copy(regex_info->modifiers), jv_copy(modifiers))) {
+    result = _make_onig_regex(regex, modifiers, regex_info);
+    if (!jv_is_valid(result)) {
+      jv_free(input);
+      return result;
+    }
+  } else {
+    jv_free(modifiers);
+  }
+
   result = test ? jv_false() : jv_array();
   const char *input_string = jv_string_value(input);
   const UChar* start = (const UChar*)jv_string_value(input);
   const unsigned long length = jv_string_length_bytes(jv_copy(input));
   const UChar* end = start + length;
-  region = onig_region_new();
+  OnigRegion *region = onig_region_new();
   do {
-    onigret = onig_search(reg,
+    onigret = onig_search(regex_info->onig_regex,
         (const UChar*)jv_string_value(input), end, /* string boundaries */
         start, end, /* search boundaries */
         region, ONIG_OPTION_NONE);
@@ -912,7 +969,7 @@ static jv f_match(jq_state *jq, jv input, jv regex, jv modifiers, jv testmode) {
         cap = jv_object_set(cap, jv_string("name"), jv_null());
         captures = jv_array_append(captures,cap);
       }
-      onig_foreach_name(reg,f_match_name_iter,&captures);
+      onig_foreach_name(regex_info->onig_regex,f_match_name_iter,&captures);
       match = jv_object_set(match, jv_string("captures"), captures);
       result = jv_array_append(result, match);
       start = (const UChar*)(input_string+region->end[0]);
@@ -920,6 +977,7 @@ static jv f_match(jq_state *jq, jv input, jv regex, jv modifiers, jv testmode) {
     } else if (onigret == ONIG_MISMATCH) {
       break;
     } else { /* Error */
+      OnigErrorInfo einfo;
       UChar ebuf[ONIG_MAX_ERROR_MESSAGE_LEN];
       onig_error_code_to_str(ebuf, onigret, einfo);
       jv_free(result);
@@ -927,12 +985,11 @@ static jv f_match(jq_state *jq, jv input, jv regex, jv modifiers, jv testmode) {
             jv_string((char*)ebuf)));
       break;
     }
-  } while (global && start != end);
+  } while (regex_info->global && start != end);
   onig_region_free(region,1);
   region = NULL;
   if (region)
     onig_region_free(region,1);
-  onig_free(reg);
   jv_free(input);
   jv_free(regex);
   return result;
